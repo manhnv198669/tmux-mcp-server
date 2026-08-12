@@ -1,0 +1,57 @@
+[project]
+# NOTE: the name "tmux-mcp" is already taken on PyPI by an unrelated project.
+# Publishing under it is impossible and `uvx tmux-mcp` would fetch that other
+# package instead of this one.
+name = "tmux-mcp-server"
+version = "1.0.0"
+description = "Model Context Protocol (MCP) server for tmux written in Python"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "HnamteiV" }]
+keywords = ["mcp", "tmux", "model-context-protocol", "terminal", "agent", "llm"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Environment :: Console",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Terminals",
+    "Topic :: System :: Systems Administration",
+    "Typing :: Typed",
+]
+dependencies = [
+    "mcp>=2.0.0",
+    "pydantic>=2.13.4",
+]
+
+[project.urls]
+Homepage = "https://github.com/manhnv198669/tmux-mcp-server"
+Repository = "https://github.com/manhnv198669/tmux-mcp-server"
+Issues = "https://github.com/manhnv198669/tmux-mcp-server/issues"
+
+[project.scripts]
+# Script name matches the distribution name so `uvx tmux-mcp-server` works with
+# no --from. The short alias stays for convenience.
+tmux-mcp-server = "tmux_mcp.__main__:main"
+tmux-mcp = "tmux_mcp.__main__:main"
+
+[build-system]
+requires = ["uv_build>=0.11.26,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+# Distribution is tmux-mcp-server; the import package stays tmux_mcp.
+module-name = "tmux_mcp"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
