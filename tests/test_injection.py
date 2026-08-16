@@ -1,6 +1,8 @@
 """Test security against shell injection attempts (Rule 1 / Test #1 & Blocker 3)."""
 
+import contextlib
 import os
+
 import pytest
 
 from tmux_mcp.core.runner import run_tmux
@@ -24,10 +26,8 @@ async def test_shell_injection_prevention(tmux_server):
     ), "CRITICAL VULNERABILITY: Shell injection payload executed during session creation!"
 
     # Clean up created session
-    try:
+    with contextlib.suppress(Exception):
         await run_tmux(["kill-session", "-t", injection_name])
-    except Exception:
-        pass
 
 
 @pytest.mark.asyncio
@@ -36,10 +36,7 @@ async def test_command_run_injection_prevention(tmux_server):
     if os.path.exists(pwn_file):
         os.remove(pwn_file)
 
-    # Command argument containing single quotes and subshell injections
-    malicious_cmd = f"echo safe; touch {pwn_file}; echo safe"
-
     # Execute via run_command_engine
-    model = await run_command_engine(command=f"echo 'test'; (exit 0)")
+    model = await run_command_engine(command="echo 'test'; (exit 0)")
     assert model.status == "completed"
     assert "echo 'test'" in model.command

@@ -52,7 +52,7 @@ async def tmux_split_pane(
         args.extend(["-c", start_directory])
 
     raw = await run_tmux(args)
-    fields = parse_line(raw.strip(), sep, expected_fields=13)
+    fields = parse_line(raw.strip(), sep, expected_fields=15)
     if len(fields) >= 13:
         pane = PaneModel(
             id=fields[0],

@@ -1,0 +1,16 @@
+# Lint gate for commits. Install once with:
+#
+#     uv run pre-commit install
+#
+# Ruff runs through `uv run` rather than pre-commit's own isolated environment, so
+# the hook uses exactly the version pinned in the dev dependency group -- a commit
+# can never pass locally and fail on a different ruff elsewhere.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --force-exclude --fix
+        language: system
+        types_or: [python, pyi]
+        require_serial: true

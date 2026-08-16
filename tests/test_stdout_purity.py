@@ -5,9 +5,10 @@ Any stray print() or library output to stdout fails the test.
 """
 
 import asyncio
-from asyncio.subprocess import PIPE
 import json
 import sys
+from asyncio.subprocess import PIPE
+
 import pytest
 
 
@@ -43,7 +44,7 @@ async def test_stdout_purity_on_initialize():
         pass
 
     proc.terminate()
-    stdout_bytes, stderr_bytes = await proc.communicate()
+    stdout_bytes, _stderr_bytes = await proc.communicate()
 
     stdout_str = stdout_bytes.decode("utf-8", errors="replace")
 
@@ -56,4 +57,4 @@ async def test_stdout_purity_on_initialize():
             data = json.loads(line)
             assert "jsonrpc" in data or "id" in data or "result" in data
         except json.JSONDecodeError:
-            pytest.fail(f"Stray output detected on stdout (corrupts MCP stdio transport): {repr(line)}")
+            pytest.fail(f"Stray output detected on stdout (corrupts MCP stdio transport): {line!r}")

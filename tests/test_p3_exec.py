@@ -2,14 +2,13 @@
 
 import asyncio
 import json
+
 import pytest
 
 from tmux_mcp.core.runner import run_tmux
 from tmux_mcp.tools.execution import (
     tmux_cancel_command,
-    tmux_get_command_result,
     tmux_run_command,
-    tmux_wait_command,
 )
 from tmux_mcp.tools.layout import tmux_split_pane
 from tmux_mcp.tools.panes import tmux_send_keys, tmux_send_special_key

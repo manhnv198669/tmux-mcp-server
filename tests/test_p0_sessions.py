@@ -1,6 +1,7 @@
 """Test P0 functionality (tmux_list_sessions)."""
 
 import json
+
 import pytest
 
 from tmux_mcp.tools.sessions import tmux_list_sessions

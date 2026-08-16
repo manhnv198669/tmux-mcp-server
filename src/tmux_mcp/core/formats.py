@@ -59,9 +59,13 @@ def get_pane_format(sep: str) -> str:
             "#{pane_pid}",
             "#{history_size}",
             "#{pane_dead}",
-            "#{pane_in_mode}",
+            "#{window_zoomed_flag}",
             "#{window_id}",
             "#{session_id}",
+            # alternate_on is 1 while a full-screen app (vim, htop, less, a nested
+            # tmux) owns the pane. Scrollback is unreachable for the duration.
+            "#{alternate_on}",
+            "#{pane_in_mode}",
         ]
     )
 

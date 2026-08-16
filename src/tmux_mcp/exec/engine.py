@@ -1,7 +1,5 @@
 """Core execution engine implementing pipe-pane and wait-for primitives safely."""
 
-import asyncio
-import json
 import logging
 import os
 import re
@@ -13,9 +11,10 @@ import uuid
 from tmux_mcp.config import get_config
 from tmux_mcp.core.ansi import strip_ansi
 from tmux_mcp.core.errors import PaneBusyError, TmuxError, TmuxNotRunningError
-from tmux_mcp.core.formats import make_sentinel, parse_line
+from tmux_mcp.core.formats import make_sentinel, parse_line, unescape_tmux_value
 from tmux_mcp.core.models import CommandRunModel
 from tmux_mcp.core.runner import run_tmux
+from tmux_mcp.exec.history import record_finished, record_started
 from tmux_mcp.exec.registry import CommandRecord, get_registry
 from tmux_mcp.exec.shells import build_epilogue
 
@@ -129,19 +128,32 @@ async def run_command_engine(
     # 1. Fetch pane info to inspect current foreground process directly using dynamic sentinel
     target_pane = pane_id or "%0"
     sep_info = make_sentinel()
+    # pane_current_path rides along on this existing query: the history log wants the
+    # directory the command actually ran in, and asking now costs no extra round-trip.
     raw_info = await run_tmux(
-        ["list-panes", "-F", f"#{{pane_id}}{sep_info}#{{pane_current_command}}{sep_info}#{{pane_dead}}", "-t", target_pane]
+        [
+            "list-panes",
+            "-F",
+            f"#{{pane_id}}{sep_info}#{{pane_current_command}}{sep_info}#{{pane_dead}}"
+            f"{sep_info}#{{pane_current_path}}",
+            "-t",
+            target_pane,
+        ]
     )
 
     matched_pane = False
+    cwd = ""
+    resolved_pane = ""
     for line in raw_info.splitlines():
-        fields = parse_line(line, sep_info, expected_fields=3)
+        fields = parse_line(line, sep_info, expected_fields=4)
         if len(fields) >= 2:
             pid_str, curr_cmd_str = fields[0], fields[1]
             is_dead = fields[2] == "1" if len(fields) >= 3 else False
             if target_pane.startswith("%") and pid_str != target_pane:
                 continue
             matched_pane = True
+            resolved_pane = pid_str
+            cwd = unescape_tmux_value(fields[3]) if len(fields) >= 4 else ""
             if is_dead:
                 raise PaneBusyError(target_pane, "dead pane")
             curr_cmd = curr_cmd_str.lower().strip()
@@ -188,11 +200,15 @@ async def run_command_engine(
     )
     registry = get_registry()
     await registry.cleanup_expired_async()
-    registry.register(model, tmp_dir, channel, cap_file, rc_file)
+    registry.register(model, tmp_dir, channel, cap_file, rc_file, cwd=cwd, pane=resolved_pane)
 
     # 6. Send command to pane
     await run_tmux(["send-keys", "-t", target_pane, "-l", "--", full_cmd])
     await run_tmux(["send-keys", "-t", target_pane, "Enter"])
+
+    # Logged at dispatch rather than at completion, so `tail -f` on the history file
+    # shows work in flight instead of only what has already finished.
+    record_started(model, cwd=cwd, pane=resolved_pane)
 
     if not wait:
         return model
@@ -219,7 +235,7 @@ async def poll_or_wait_record(rec: CommandRecord, timeout: float = 30.0) -> Comm
     try:
         await run_tmux(["wait-for", rec.channel], timeout=timeout)
         return await finalize_record(rec)
-    except (TmuxError, asyncio.TimeoutError):
+    except (TimeoutError, TmuxError):
         if os.path.exists(rec.rc_file) and os.path.getsize(rec.rc_file) > 0:
             return await finalize_record(rec)
         return _update_running_record(rec)
@@ -232,7 +248,7 @@ async def finalize_record(rec: CommandRecord) -> CommandRunModel:
     exit_code = 0
     if os.path.exists(rec.rc_file):
         try:
-            with open(rec.rc_file, "r") as f:
+            with open(rec.rc_file) as f:
                 content = f.read().strip()
                 if content.lstrip("-").isdigit():
                     exit_code = int(content)
@@ -243,7 +259,7 @@ async def finalize_record(rec: CommandRecord) -> CommandRunModel:
     truncated = False
     if os.path.exists(rec.cap_file):
         try:
-            with open(rec.cap_file, "r", errors="replace") as f:
+            with open(rec.cap_file, errors="replace") as f:
                 output_text, truncated = extract_clean_output(f.read(), rec.model.command_id)
         except OSError as e:
             logger.warning("Could not read capture file %s: %s", rec.cap_file, e)
@@ -252,6 +268,10 @@ async def finalize_record(rec: CommandRecord) -> CommandRunModel:
     rec.model.status = "completed" if exit_code == 0 else "failed"
     rec.model.output = output_text
     rec.model.truncated = truncated
+
+    # poll_or_wait_record returns early once the status is terminal, so this runs
+    # exactly once per command no matter how often the caller polls.
+    record_finished(rec.model, cwd=rec.cwd, pane=rec.pane)
     return rec.model
 
 
@@ -261,7 +281,7 @@ def _update_running_record(rec: CommandRecord) -> CommandRunModel:
     truncated = False
     if os.path.exists(rec.cap_file):
         try:
-            with open(rec.cap_file, "r", errors="replace") as f:
+            with open(rec.cap_file, errors="replace") as f:
                 output_text, truncated = extract_clean_output(f.read(), rec.model.command_id)
         except OSError as e:
             logger.warning("Could not read capture file %s: %s", rec.cap_file, e)

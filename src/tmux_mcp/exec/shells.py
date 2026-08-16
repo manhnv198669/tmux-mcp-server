@@ -1,6 +1,7 @@
 """Shell epilogue templates with execution boundary markers for clean output extraction."""
 
 import shutil
+
 from tmux_mcp.core.runner import get_socket_args
 
 

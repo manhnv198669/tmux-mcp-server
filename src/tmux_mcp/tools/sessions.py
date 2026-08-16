@@ -2,10 +2,10 @@
 
 import json
 
-from tmux_mcp.core.formats import get_session_format, make_sentinel, parse_line, unescape_tmux_value
+from tmux_mcp.core.errors import TmuxError, TmuxNotRunningError
+from tmux_mcp.core.formats import get_session_format, make_sentinel, parse_line
 from tmux_mcp.core.models import SessionModel
 from tmux_mcp.core.runner import run_tmux
-from tmux_mcp.core.errors import TmuxError, TmuxNotRunningError
 
 
 async def tmux_list_sessions(target: str = "") -> str:
@@ -93,6 +93,12 @@ async def tmux_create_session(
 ) -> str:
     """Create a new detached tmux session.
 
+    Requested width/height are enforced, not merely suggested: the default
+    `window-size latest` makes tmux resize a detached window to whatever client is
+    newest on the server, silently discarding -x/-y. This pins the window instead,
+    which matters for driving TUIs -- an app rendered at 320 columns costs several
+    times more to read back than the same screen at 120.
+
     Args:
         name: Name for the new session (optional, tmux auto-names if empty).
         start_directory: Starting directory path for initial window.
@@ -109,24 +115,53 @@ async def tmux_create_session(
         args.extend(["-s", name])
     if start_directory:
         args.extend(["-c", start_directory])
-    if width > 0 and height > 0:
+
+    fixed_size = width > 0 and height > 0
+    if fixed_size:
         args.extend(["-x", str(width), "-y", str(height)])
 
     raw = await run_tmux(args)
     fields = parse_line(raw.strip(), sep, expected_fields=7)
-    if len(fields) >= 7:
-        session = SessionModel(
-            id=fields[0],
-            name=fields[1],
-            attached=fields[2] == "1",
-            windows_count=int(fields[3]) if fields[3].isdigit() else 0,
-            created_ts=int(fields[4]) if fields[4].isdigit() else 0,
-            width=int(fields[5]) if fields[5].isdigit() else 0,
-            height=int(fields[6]) if fields[6].isdigit() else 0,
-        )
-        return json.dumps(session.model_dump(), indent=2)
+    if len(fields) < 7:
+        return json.dumps({"status": "created", "name": name})
 
-    return json.dumps({"status": "created", "name": name})
+    session_id = fields[0]
+
+    if fixed_size:
+        await run_tmux(["set-option", "-w", "-t", session_id, "window-size", "manual"])
+        await run_tmux(["resize-window", "-t", session_id, "-x", str(width), "-y", str(height)])
+
+    # session_width/session_height render empty for a detached session, so the real
+    # dimensions have to come from the window itself.
+    actual_w, actual_h = 0, 0
+    try:
+        size_sep = make_sentinel()
+        size_raw = await run_tmux(
+            [
+                "display-message",
+                "-p",
+                "-t",
+                session_id,
+                size_sep.join(["#{window_width}", "#{window_height}"]),
+            ]
+        )
+        size_fields = parse_line(size_raw.strip(), size_sep, expected_fields=2)
+        if len(size_fields) >= 2:
+            actual_w = int(size_fields[0]) if size_fields[0].isdigit() else 0
+            actual_h = int(size_fields[1]) if size_fields[1].isdigit() else 0
+    except (TmuxNotRunningError, TmuxError):
+        pass
+
+    session = SessionModel(
+        id=session_id,
+        name=fields[1],
+        attached=fields[2] == "1",
+        windows_count=int(fields[3]) if fields[3].isdigit() else 0,
+        created_ts=int(fields[4]) if fields[4].isdigit() else 0,
+        width=actual_w or (int(fields[5]) if fields[5].isdigit() else 0),
+        height=actual_h or (int(fields[6]) if fields[6].isdigit() else 0),
+    )
+    return json.dumps(session.model_dump(), indent=2)
 
 
 async def tmux_rename_session(target: str = "", new_name: str = "") -> str:

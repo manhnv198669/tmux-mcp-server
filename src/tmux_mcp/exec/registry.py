@@ -1,11 +1,10 @@
 """Command registry with TTL and LRU eviction for tracked executions."""
 
-from dataclasses import dataclass
 import logging
 import os
 import shutil
 import time
-from typing import Dict, Optional
+from dataclasses import dataclass
 
 from tmux_mcp.core.errors import TmuxError, TmuxNotRunningError
 from tmux_mcp.core.models import CommandRunModel
@@ -22,6 +21,12 @@ class CommandRecord:
     cap_file: str
     rc_file: str
     last_accessed: float
+    # Where the pane sat when the command was dispatched. Kept for the history log,
+    # since by the time the command finishes the pane may have moved on.
+    cwd: str = ""
+    # The resolved %id of the target, as opposed to model.pane_id which is whatever
+    # string the caller happened to pass.
+    pane: str = ""
 
 
 class CommandRegistry:
@@ -30,7 +35,7 @@ class CommandRegistry:
     def __init__(self, max_entries: int = 500, ttl_seconds: float = 3600.0):
         self.max_entries = max_entries
         self.ttl_seconds = ttl_seconds
-        self._records: Dict[str, CommandRecord] = {}
+        self._records: dict[str, CommandRecord] = {}
 
     def register(
         self,
@@ -39,6 +44,8 @@ class CommandRegistry:
         channel: str,
         cap_file: str,
         rc_file: str,
+        cwd: str = "",
+        pane: str = "",
     ) -> None:
         rec = CommandRecord(
             model=model,
@@ -47,10 +54,12 @@ class CommandRegistry:
             cap_file=cap_file,
             rc_file=rc_file,
             last_accessed=time.time(),
+            cwd=cwd,
+            pane=pane,
         )
         self._records[model.command_id] = rec
 
-    def get(self, command_id: str) -> Optional[CommandRecord]:
+    def get(self, command_id: str) -> CommandRecord | None:
         rec = self._records.get(command_id)
         if rec:
             rec.last_accessed = time.time()

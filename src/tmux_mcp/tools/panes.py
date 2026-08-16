@@ -5,10 +5,11 @@ import re
 from typing import Literal
 
 from tmux_mcp.core.ansi import strip_ansi
+from tmux_mcp.core.errors import TmuxError, TmuxNotRunningError
 from tmux_mcp.core.formats import get_pane_format, make_sentinel, parse_line, unescape_tmux_value
+from tmux_mcp.core.guard import assert_pane_writable
 from tmux_mcp.core.models import PaneModel
 from tmux_mcp.core.runner import run_tmux
-from tmux_mcp.core.errors import TmuxError, TmuxNotRunningError
 
 SpecialKeyType = Literal[
     "Up",
@@ -50,6 +51,8 @@ def _parse_pane_model(fields: list[str]) -> PaneModel | None:
     if len(fields) < 13:
         return None
     return PaneModel(
+        alternate_on=len(fields) > 13 and fields[13] == "1",
+        in_mode=len(fields) > 14 and fields[14] == "1",
         id=fields[0],
         index=int(fields[1]) if fields[1].isdigit() else 0,
         active=fields[2] == "1",
@@ -92,7 +95,7 @@ async def tmux_list_panes(target: str = "", all_panes: bool = False) -> str:
 
     panes: list[dict] = []
     for line in raw.splitlines():
-        fields = parse_line(line, sep, expected_fields=13)
+        fields = parse_line(line, sep, expected_fields=15)
         model = _parse_pane_model(fields)
         if model:
             panes.append(model.model_dump())
@@ -122,7 +125,7 @@ async def tmux_get_pane_info(target: str = "") -> str:
         raise e
 
     for line in raw.splitlines():
-        fields = parse_line(line, sep, expected_fields=13)
+        fields = parse_line(line, sep, expected_fields=15)
         model = _parse_pane_model(fields)
         if model:
             if target and target.startswith("%"):
@@ -141,10 +144,16 @@ async def tmux_read_pane(
     include_colors: bool = False,
     start: int = 0,
     end: int = 0,
+    join_wrapped: bool = False,
 ) -> str:
     """Read visible text and scrollback history from a target pane.
 
     Always includes history_size and truncated flag so the caller knows if content was truncated.
+
+    When the pane is running a full-screen app (vim, htop, less, a nested tmux),
+    tmux keeps no reachable scrollback for it: only the visible screen exists. That
+    case is reported as scrollback_available=false plus a warning, and `truncated`
+    is set whenever history was asked for but could not be delivered.
 
     Args:
         target: Target pane ID (e.g. "%0"). Default active pane.
@@ -153,19 +162,25 @@ async def tmux_read_pane(
         include_colors: If True, keep ANSI color escape sequences.
         start: Starting line index for range capture (optional, e.g. -500).
         end: Ending line index for range capture (optional).
+        join_wrapped: If True, rejoin lines the terminal wrapped at pane width, so a
+            long value split across two rows comes back as one string (capture-pane -J).
 
     Returns:
-        JSON string: { pane_id, history_size, lines_returned, truncated, text }
+        JSON string: { pane_id, history_size, lines_returned, truncated,
+                       scrollback_available, alternate_on, text, warning? }
     """
     info_json = await tmux_get_pane_info(target)
     info = json.loads(info_json)
     pane_id = info.get("id", target or "%0")
     history_size = info.get("history_size", 0)
+    alternate_on = bool(info.get("alternate_on", False))
 
     args = ["capture-pane", "-p", "-t", pane_id]
 
     if include_colors:
         args.append("-e")
+    if join_wrapped:
+        args.append("-J")
 
     if full_history:
         args.extend(["-S", "-"])
@@ -186,6 +201,8 @@ async def tmux_read_pane(
                 "history_size": 0,
                 "lines_returned": 0,
                 "truncated": False,
+                "scrollback_available": not alternate_on,
+                "alternate_on": alternate_on,
                 "text": "",
                 "error": str(e),
             },
@@ -198,19 +215,35 @@ async def tmux_read_pane(
     output_lines = raw_text.splitlines()
     returned_count = len(output_lines)
 
-    # Output is truncated if history is larger than requested lines
-    truncated = not full_history and (lines > 0) and (history_size > lines)
+    history_requested = full_history or start != 0 or (lines > 0 and not (start or end))
 
-    return json.dumps(
-        {
-            "pane_id": pane_id,
-            "history_size": history_size,
-            "lines_returned": returned_count,
-            "truncated": truncated,
-            "text": raw_text,
-        },
-        indent=2,
-    )
+    if alternate_on:
+        # tmux parks the pane's history while the alternate screen is up, so
+        # history_size reads as ~1 and the usual comparison would claim nothing was
+        # missed. Anything older than the visible screen is simply unreachable here.
+        truncated = history_requested
+    else:
+        truncated = not full_history and (lines > 0) and (history_size > lines)
+
+    result = {
+        "pane_id": pane_id,
+        "history_size": history_size,
+        "lines_returned": returned_count,
+        "truncated": truncated,
+        "scrollback_available": not alternate_on,
+        "alternate_on": alternate_on,
+        "text": raw_text,
+    }
+
+    if alternate_on:
+        result["warning"] = (
+            "Pane is on the alternate screen (full-screen app such as vim, htop, less "
+            "or a nested tmux), so only the visible screen was returned and no "
+            "scrollback exists to read. lines/full_history/start/end had no effect. "
+            "To reach earlier output, read the underlying log file instead."
+        )
+
+    return json.dumps(result, indent=2)
 
 
 async def tmux_search_pane(
@@ -226,7 +259,8 @@ async def tmux_search_pane(
         max_results: Maximum matching lines to return (default: 50).
 
     Returns:
-        JSON string: { pane_id, total_matches, matches: [{ line_no, text }] }
+        JSON string: { pane_id, total_matches, searched_lines, scrollback_available,
+                       matches: [{ line_no, text }], warning? }
     """
     if not pattern:
         return json.dumps({"pane_id": target, "total_matches": 0, "matches": []})
@@ -235,6 +269,7 @@ async def tmux_search_pane(
     data = json.loads(read_res)
     text = data.get("text", "")
     pane_id = data.get("pane_id", target)
+    scrollback_available = data.get("scrollback_available", True)
 
     lines = text.splitlines()
     regex = re.compile(pattern)
@@ -246,35 +281,54 @@ async def tmux_search_pane(
             if len(matches) >= max_results:
                 break
 
-    return json.dumps(
-        {
-            "pane_id": pane_id,
-            "total_matches": len(matches),
-            "matches": matches,
-        },
-        indent=2,
-    )
+    result = {
+        "pane_id": pane_id,
+        "total_matches": len(matches),
+        "searched_lines": len(lines),
+        "scrollback_available": scrollback_available,
+        "matches": matches,
+    }
+
+    if not scrollback_available:
+        # Without this the caller reads "0 matches" as "not in this pane's history",
+        # when in fact only the visible screen was ever searched.
+        result["warning"] = (
+            f"Only the {len(lines)} visible lines were searched: the pane is on the "
+            "alternate screen (full-screen app or nested tmux) and has no reachable "
+            "scrollback. A zero result does NOT mean the pattern never appeared."
+        )
+
+    return json.dumps(result, indent=2)
 
 
 async def tmux_send_keys(
     target: str = "",
     keys: str = "",
     enter: bool = False,
+    exit_copy_mode: bool = False,
 ) -> str:
     """Send literal string text to a target pane.
 
     Uses send-keys -l -- to safely send literal text without interpreting key names.
 
+    Refuses if the pane is in copy-mode: tmux would feed the keys to the mode's key
+    table, execute a truncated fragment of them in the shell, and silently drop the
+    rest.
+
     Args:
         target: Target pane ID (e.g. "%0").
         keys: Literal text content to send.
         enter: If True, sends Enter key after text payload (default False).
+        exit_copy_mode: If True, cancel an active copy-mode before typing instead of
+            refusing. This yanks a human viewer's screen back to the live output.
 
     Returns:
         JSON status message.
     """
     if not keys and not enter:
         return json.dumps({"status": "no_op"})
+
+    await assert_pane_writable(target, exit_copy_mode=exit_copy_mode)
 
     if keys:
         args = ["send-keys"]
@@ -297,17 +351,25 @@ async def tmux_send_special_key(
     target: str = "",
     key: SpecialKeyType = "Enter",
     repeat: int = 1,
+    exit_copy_mode: bool = False,
 ) -> str:
     """Send a special keyboard shortcut or arrow key to a pane.
+
+    Refuses if the pane is in copy-mode, where navigation keys would scroll a human
+    viewer's screen instead of reaching the application.
 
     Args:
         target: Target pane ID (e.g. "%0").
         key: Special key name (e.g. Up, Down, C-c, Enter, Escape, Tab).
         repeat: Number of times to repeat keypress (default 1).
+        exit_copy_mode: If True, cancel an active copy-mode before sending instead of
+            refusing.
 
     Returns:
         JSON status message.
     """
+    await assert_pane_writable(target, exit_copy_mode=exit_copy_mode)
+
     args = ["send-keys"]
     if target:
         args.extend(["-t", target])

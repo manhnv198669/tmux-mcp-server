@@ -2,8 +2,10 @@
 
 import json
 
-from tmux_mcp.core.errors import PaneBusyError, TmuxError
+from tmux_mcp.core.errors import PaneBusyError, PaneInModeError, TmuxError
+from tmux_mcp.core.guard import assert_pane_writable
 from tmux_mcp.exec.engine import poll_or_wait_record, run_command_engine, stop_pipe_pane
+from tmux_mcp.exec.history import record_finished
 from tmux_mcp.exec.registry import get_registry
 from tmux_mcp.tools.panes import tmux_send_special_key
 
@@ -13,6 +15,7 @@ async def tmux_run_command(
     command: str = "",
     timeout: float = 30.0,
     wait: bool = True,
+    exit_copy_mode: bool = False,
 ) -> str:
     """Run a shell command in a tmux pane with exact exit code and pipe-pane output capture.
 
@@ -21,12 +24,22 @@ async def tmux_run_command(
         command: Shell command string to execute.
         timeout: Timeout in seconds to wait if wait=True (default 30.0).
         wait: If True, block until command finishes or times out (default True).
+        exit_copy_mode: If True, cancel an active copy-mode before running instead of
+            refusing.
 
     Returns:
         JSON string of CommandRunModel or error response.
     """
     if not command:
         return json.dumps({"error": "command cannot be empty"})
+
+    try:
+        await assert_pane_writable(target, exit_copy_mode=exit_copy_mode)
+    except PaneInModeError as e:
+        return json.dumps(
+            {"error": str(e), "pane_id": e.pane_id, "pane_mode": e.mode},
+            indent=2,
+        )
 
     try:
         model = await run_command_engine(
@@ -126,11 +139,14 @@ async def tmux_cancel_command(command_id: str = "") -> str:
     if not rec:
         return json.dumps({"error": f"command {command_id} not found"})
 
-    # Send C-c to pane to cancel command
-    await tmux_send_special_key(target=rec.model.pane_id, key="C-c")
+    # Send C-c to pane to cancel command. A cancel must not be blocked by someone
+    # scrolling the pane, so the mode is dropped first -- otherwise copy-mode would
+    # swallow the C-c and the command would keep running.
+    await tmux_send_special_key(target=rec.model.pane_id, key="C-c", exit_copy_mode=True)
 
     # Turn off pipe-pane capture stream immediately (Lỗi 3)
     await stop_pipe_pane(rec.model.pane_id)
 
     rec.model.status = "cancelled"
+    record_finished(rec.model, cwd=rec.cwd, pane=rec.pane)
     return json.dumps(rec.model.model_dump(), indent=2)

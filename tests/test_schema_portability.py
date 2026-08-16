@@ -4,6 +4,7 @@ Ensures tool schemas are strictly flat with no $ref, $defs, anyOf, allOf, or one
 """
 
 import re
+
 import pytest
 
 from tmux_mcp.config import Config

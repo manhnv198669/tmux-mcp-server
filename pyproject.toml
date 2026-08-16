@@ -54,4 +54,43 @@ module-name = "tmux_mcp"
 dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
+    "ruff>=0.14.0",
+    "pre-commit>=4.0.0",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Every test in this suite is a coroutine driving tmux over asyncio. "auto" collects
+# them without a per-test @pytest.mark.asyncio, so a missing marker can no longer
+# make a test silently pass by never being awaited.
+asyncio_mode = "auto"
+# Pinned explicitly: pytest-asyncio warns (and will change the default) otherwise.
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle
+    "F",    # pyflakes -- unused imports/names
+    "I",    # isort -- import ordering
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "SIM",  # simplify
+    "RUF",
+]
+ignore = [
+    "E501",  # line length is reported by the formatter, not the linter
+    "B008",  # tool signatures legitimately call in defaults
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Logging must be pinned to stderr before importing anything that might log, or a
+# stray print corrupts the MCP stdio transport. The late imports are the point.
+"src/tmux_mcp/__main__.py" = ["E402"]
+# Tests assert on expressions and re-import tool modules for schema checks.
+"tests/*" = ["B011"]

@@ -1,13 +1,14 @@
 """Tests for Phase 4 (destructive tools, read-only mode, and tool profiles)."""
 
 import json
+
 import pytest
 
 from tmux_mcp.config import Config
 from tmux_mcp.server import create_server
 from tmux_mcp.tools.layout import tmux_kill_pane, tmux_split_pane
-from tmux_mcp.tools.sessions import tmux_create_session, tmux_kill_session, tmux_list_sessions
-from tmux_mcp.tools.windows import tmux_create_window, tmux_kill_window, tmux_list_windows
+from tmux_mcp.tools.sessions import tmux_create_session, tmux_kill_session
+from tmux_mcp.tools.windows import tmux_create_window, tmux_kill_window
 
 
 @pytest.mark.asyncio

@@ -1,18 +1,21 @@
 """Tests for Phase 2 mutating tools."""
 
 import json
+
 import pytest
 
 from tmux_mcp.tools.layout import (
-    tmux_resize_pane,
-    tmux_select_pane,
     tmux_set_layout,
     tmux_split_pane,
     tmux_zoom_pane,
 )
-from tmux_mcp.tools.panes import tmux_clear_pane, tmux_read_pane, tmux_send_keys, tmux_send_special_key
-from tmux_mcp.tools.sessions import tmux_create_session, tmux_list_sessions, tmux_rename_session
-from tmux_mcp.tools.windows import tmux_create_window, tmux_list_windows, tmux_rename_window
+from tmux_mcp.tools.panes import (
+    tmux_read_pane,
+    tmux_send_keys,
+    tmux_send_special_key,
+)
+from tmux_mcp.tools.sessions import tmux_create_session, tmux_rename_session
+from tmux_mcp.tools.windows import tmux_create_window, tmux_rename_window
 
 
 @pytest.mark.asyncio

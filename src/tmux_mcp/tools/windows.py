@@ -2,10 +2,10 @@
 
 import json
 
+from tmux_mcp.core.errors import TmuxError, TmuxNotRunningError
 from tmux_mcp.core.formats import get_window_format, make_sentinel, parse_line, unescape_tmux_value
 from tmux_mcp.core.models import WindowModel
 from tmux_mcp.core.runner import run_tmux
-from tmux_mcp.core.errors import TmuxError, TmuxNotRunningError
 
 
 async def tmux_list_windows(target: str = "", all_sessions: bool = False) -> str:

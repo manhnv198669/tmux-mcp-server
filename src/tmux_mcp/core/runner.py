@@ -5,9 +5,9 @@ All tmux commands pass through this module as explicit argv lists.
 """
 
 import asyncio
-from asyncio.subprocess import PIPE
 import logging
 import uuid
+from asyncio.subprocess import PIPE
 
 from tmux_mcp.config import get_config
 from tmux_mcp.core.errors import TmuxError, TmuxNotRunningError
@@ -49,12 +49,12 @@ async def run_tmux(
             stdout=PIPE,
             stderr=PIPE,
         )
-    except FileNotFoundError:
-        raise TmuxNotRunningError("tmux binary not found in PATH")
+    except FileNotFoundError as e:
+        raise TmuxNotRunningError("tmux binary not found in PATH") from e
 
     try:
         out_bytes, err_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         try:
             proc.kill()
             await proc.wait()
@@ -63,7 +63,7 @@ async def run_tmux(
             logger.debug("tmux process %s already gone when killing after timeout", proc.pid)
         except OSError as e:
             logger.warning("Failed to kill timed-out tmux process %s: %s", proc.pid, e)
-        raise TmuxError(argv, -1, f"Execution timed out after {timeout}s")
+        raise TmuxError(argv, -1, f"Execution timed out after {timeout}s") from None
 
     stdout = out_bytes.decode(errors="replace")
     stderr = err_bytes.decode(errors="replace")

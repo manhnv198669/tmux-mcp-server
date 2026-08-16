@@ -1,6 +1,7 @@
 """Test parsing names with colons ':', octal string sequences, backslashes, spaces, and special characters."""
 
 import json
+
 import pytest
 
 from tmux_mcp.core.runner import run_tmux

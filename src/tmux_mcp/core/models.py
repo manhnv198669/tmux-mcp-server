@@ -36,6 +36,14 @@ class PaneModel(BaseModel):
     zoomed: bool = Field(default=False, description="Whether pane is zoomed")
     window_id: str = Field(description="Belonging window ID")
     session_id: str = Field(description="Belonging session ID")
+    alternate_on: bool = Field(
+        default=False,
+        description=(
+            "Whether a full-screen app (vim, htop, less, a nested tmux) owns the pane. "
+            "While true the pane has no reachable scrollback: only the visible screen can be read."
+        ),
+    )
+    in_mode: bool = Field(default=False, description="Whether pane is in copy/view mode")
 
 
 class CommandRunModel(BaseModel):

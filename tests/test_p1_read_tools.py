@@ -1,10 +1,16 @@
 """Tests for Phase 1 read-only tools."""
 
 import json
+
 import pytest
 
-from tmux_mcp.tools.inspect import tmux_list_clients, tmux_server_info, tmux_show_options
-from tmux_mcp.tools.panes import tmux_get_pane_info, tmux_list_panes, tmux_read_pane, tmux_search_pane
+from tmux_mcp.tools.inspect import tmux_server_info, tmux_show_options
+from tmux_mcp.tools.panes import (
+    tmux_get_pane_info,
+    tmux_list_panes,
+    tmux_read_pane,
+    tmux_search_pane,
+)
 from tmux_mcp.tools.sessions import tmux_get_session, tmux_list_sessions
 from tmux_mcp.tools.windows import tmux_list_windows
 

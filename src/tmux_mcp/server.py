@@ -1,10 +1,16 @@
 """MCPServer setup and tool registration with profile validation."""
 
+import functools
+import inspect
 import logging
+from collections.abc import Callable
+from typing import Any
+
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
 from tmux_mcp.config import Config, get_config, set_config
+from tmux_mcp.core.guard import assert_target_allowed
 from tmux_mcp.tools.execution import (
     tmux_cancel_command,
     tmux_get_command_result,
@@ -81,6 +87,31 @@ STANDARD_PROFILE_TOOLS = {
     "server_info",
     "list_clients",
 }
+
+# Parameters that name something a mutating tool is about to write to.
+GUARDED_PARAMS = ("target", "to_pane")
+
+
+def _protect(func: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap a mutating tool so protected targets are refused before tmux is touched.
+
+    Defaults are applied before checking, because an omitted target is not "no
+    target" -- it means tmux's current pane, which is precisely the case worth
+    guarding. functools.wraps keeps __wrapped__ intact so MCP still derives the
+    tool schema from the original signature.
+    """
+    sig = inspect.signature(func)
+
+    @functools.wraps(func)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        bound = sig.bind(*args, **kwargs)
+        bound.apply_defaults()
+        for param in GUARDED_PARAMS:
+            if param in sig.parameters:
+                await assert_target_allowed(bound.arguments.get(param) or "")
+        return await func(*args, **kwargs)
+
+    return wrapper
 
 
 def create_server(config: Config | None = None) -> MCPServer:
@@ -162,13 +193,11 @@ def create_server(config: Config | None = None) -> MCPServer:
         if unknown:
             raise ValueError(f"Invalid tool profile or unknown tool name(s) in --tools: {unknown}")
 
-    for name, func, desc, annot, is_mutating, is_destructive in all_tools_map:
+    for name, func, desc, annot, is_mutating, _is_destructive in all_tools_map:
         if cfg.read_only and is_mutating:
             continue
 
-        if profile == "read" and is_mutating:
-            continue
-        elif profile == "standard" and name not in STANDARD_PROFILE_TOOLS:
+        if (profile == "read" and is_mutating) or (profile == "standard" and name not in STANDARD_PROFILE_TOOLS):
             continue
         elif profile in ("full", ""):
             pass
@@ -177,10 +206,15 @@ def create_server(config: Config | None = None) -> MCPServer:
             if name not in allowed_names:
                 continue
 
+        registered = _protect(func) if (is_mutating and cfg.protected_targets) else func
+
         app.tool(
             name=name,
             description=desc,
             annotations=annot,
-        )(func)
+        )(registered)
+
+    if cfg.protected_targets:
+        logger.info("Write protection active for targets: %s", ", ".join(cfg.protected_targets))
 
     return app
