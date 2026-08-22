@@ -1,6 +1,6 @@
 """Configuration settings for tmux-mcp."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # Defaulting under /tmp is deliberate: the OS reclaims it on its own schedule, so an
 # audit log nobody reads cannot grow forever. Point --commands-history-file
@@ -23,6 +23,12 @@ class Config:
     # shell history, which is theirs to navigate.
     save_commands_history: bool = True
     commands_history_file: str = DEFAULT_COMMANDS_HISTORY_FILE
+    remote_host: str = ""
+    remote_ssh_opts: tuple[str, ...] = ()
+    remote_ssh_overhead: float = 5.0
+    remote_tmp_dir: str = "/tmp"
+    allowed_hosts: tuple[str, ...] = ()
+    host_sockets: dict[str, str] = field(default_factory=dict)
 
 
 _global_config: Config = Config()

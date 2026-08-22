@@ -36,6 +36,95 @@ uvx tmux-mcp-server --protect 'prod-*' --protect 'skinstrading:3*'
 
 ---
 
+## Driving a Remote tmux over ssh
+
+One MCP server instance now drives tmux on any machine. `--remote-host` sets the
+*default* host for calls that do not name one, and every tool accepts an optional
+`host` argument to route that single call elsewhere over ssh. You only need one MCP
+entry:
+
+```json
+{
+  "mcpServers": {
+    "tmux": {
+      "command": "uvx",
+      "args": [
+        "tmux-mcp-server",
+        "--remote-host", "prod-01",
+        "--ssh-opt", "-p", "--ssh-opt", "2222",
+        "--protect", "host:prod-*",
+        "--allow-host", "prod-*",
+        "--allow-host", "staging-*"
+      ]
+    }
+  }
+}
+```
+
+One entry, many machines -- the host travels with the call:
+
+```jsonc
+read_pane   { "target": "deploy:0.0", "host": "glinteco-website" }
+run_command { "command": "systemctl is-active nginx", "host": "prod-2" }
+read_pane   { "target": "%3" }                  // no host: the local tmux
+```
+
+`BatchMode=yes` is always set, so ssh authentication must be non-interactive: a key or an
+agent. A host that would prompt for a password fails immediately with a clear error rather
+than hanging until the timeout. `--remote-host` is also settable as `TMUX_MCP_REMOTE_HOST`.
+
+Reading a remote pane this way beats reading one through a local pane that happens to hold
+an ssh session: `capture-pane` runs on the remote server, so the full scrollback is
+available instead of only the visible screen.
+
+`run_command` works against a remote host too. Its capture and exit-code files are created
+and read on whichever machine the tmux server lives on, so the exit code you get back is
+the remote command's own. `--remote-tmp-dir` (default `/tmp`) chooses where those files
+go, since the local temporary directory does not exist over there.
+
+### Why `--allow-host`?
+
+An agent holding an ssh agent key can otherwise reach every machine that key opens, and
+nothing in this server would have said no. `--allow-host` is a fnmatch allowlist that
+limits which hosts the server is willing to drive. An empty host (the server's default)
+always passes. When no `--allow-host` is given, any host is allowed. `--allow-host` is
+also settable as `TMUX_MCP_ALLOWED_HOSTS`.
+
+### When the remote socket is not where tmux looks
+
+tmux derives its default socket from the *current uid*. If ssh lands you on the remote host
+as a different user than the one running tmux, the default socket is simply the wrong path
+and tmux reports "no server running" -- which reads like the server is down when it is
+merely somebody else's.
+
+A real case: `ssh glinteco-website` arrives as `root`, while the tmux server there belongs
+to `ubuntu` on `/tmp/tmux-1000/default`. root can read that socket perfectly well once told
+where it is:
+
+```bash
+uvx tmux-mcp-server --host-socket 'glinteco-website=/tmp/tmux-1000/default'
+```
+
+`--host-socket HOST=SOCKET` is repeatable and the host side is an fnmatch pattern, so a
+fleet with a shared convention needs one line: `--host-socket 'prod-*=/tmp/tmux-1000/default'`.
+A value starting with `/` becomes `-S`, anything else becomes `-L`. It only applies to calls
+that name a host; the local tmux keeps using `--socket-name` / `--socket-path` as before.
+Also settable as `TMUX_MCP_HOST_SOCKETS` (comma-separated pairs).
+
+### Protecting a whole host
+
+`--protect` matches by identity, just like target names. When a host is active, an
+identity of the form `host:<name>` is included, so:
+
+```bash
+uvx tmux-mcp-server --protect 'host:prod-*'
+```
+
+makes every mutating tool refuse on those machines while reads still work. This works
+even when the remote host is unreachable: the identity is checked before tmux is touched.
+
+---
+
 ## Protecting Specific Targets
 
 `--read-only` is all-or-nothing: it strips every mutating tool from the server. When

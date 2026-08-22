@@ -69,6 +69,20 @@ def parse_args() -> Config:
         ),
     )
     parser.add_argument(
+        "--allow-host",
+        action="append",
+        default=[],
+        metavar="HOST",
+        help=(
+            "Allowlist pattern for per-call host routing. An agent holding an ssh agent "
+            "key can otherwise reach every machine that key opens, and nothing in this "
+            "server would have said no. Repeatable, and comma-separated values are "
+            "accepted. An empty host (the server's default) always passes. When no "
+            "--allow-host is given, any host is allowed. Also settable via "
+            "TMUX_MCP_ALLOWED_HOSTS."
+        ),
+    )
+    parser.add_argument(
         "--default-capture-lines",
         type=int,
         default=200,
@@ -90,6 +104,47 @@ def parse_args() -> Config:
         help="Record executed commands nowhere. Overrides --commands-history-file.",
     )
     parser.add_argument(
+        "--remote-host",
+        default="",
+        metavar="HOST",
+        help=(
+            "Drive the tmux server on this ssh destination (e.g. 'prod-01' or "
+            "'deploy@10.0.0.5') instead of a local one. Every tmux command is then "
+            "wrapped in 'ssh -o BatchMode=yes'. Also settable via TMUX_MCP_REMOTE_HOST."
+        ),
+    )
+    parser.add_argument(
+        "--ssh-opt",
+        action="append",
+        default=[],
+        metavar="OPT",
+        help=(
+            "Extra ssh option passed to every remote invocation, e.g. --ssh-opt=-p "
+            "--ssh-opt=2222. Repeatable; only used with --remote-host."
+        ),
+    )
+    parser.add_argument(
+        "--remote-tmp-dir",
+        default="/tmp",
+        metavar="DIR",
+        help=(
+            "Directory on the remote host for run_command's capture and exit-code "
+            "files (default: /tmp). The local temporary directory does not exist "
+            "there. Only used with --remote-host."
+        ),
+    )
+    parser.add_argument(
+        "--host-socket",
+        action="append",
+        default=[],
+        metavar="HOST=SOCKET",
+        help=(
+            "Per-host socket override, e.g. 'host=/tmp/tmux-1000/default' or 'host=sockname'. "
+            "Repeatable. Values with no '=' are rejected. Also settable via "
+            "TMUX_MCP_HOST_SOCKETS (comma-separated)."
+        ),
+    )
+    parser.add_argument(
         "--log-level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         default="INFO",
@@ -105,6 +160,25 @@ def parse_args() -> Config:
         [*args.protect, os.environ.get("TMUX_MCP_PROTECTED_TARGETS", "")]
     )
 
+    allowed_hosts = parse_patterns(
+        [*args.allow_host, os.environ.get("TMUX_MCP_ALLOWED_HOSTS", "")]
+    )
+
+    host_sockets: dict[str, str] = {}
+    raw_host_socket_specs = [
+        *args.host_socket,
+        *[
+            s.strip()
+            for s in os.environ.get("TMUX_MCP_HOST_SOCKETS", "").split(",")
+            if s.strip()
+        ],
+    ]
+    for spec in raw_host_socket_specs:
+        if "=" not in spec:
+            parser.error(f"--host-socket values must be HOST=SOCKET, got: {spec!r}")
+        host, _, socket = spec.partition("=")
+        host_sockets[host] = socket
+
     return Config(
         protected_targets=protected,
         socket_name=args.socket_name,
@@ -116,6 +190,11 @@ def parse_args() -> Config:
         log_level=args.log_level,
         save_commands_history=not args.no_save_commands_history,
         commands_history_file=args.commands_history_file,
+        remote_host=args.remote_host or os.environ.get("TMUX_MCP_REMOTE_HOST", ""),
+        remote_ssh_opts=tuple(args.ssh_opt),
+        remote_tmp_dir=args.remote_tmp_dir,
+        allowed_hosts=allowed_hosts,
+        host_sockets=host_sockets,
     )
 
 

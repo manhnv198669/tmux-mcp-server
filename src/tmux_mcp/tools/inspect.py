@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 async def tmux_server_info() -> str:
-    """Get general status of tmux server using batch runner (version, socket, session count, client count).
+    """Get general status of tmux server using batch runner (version, socket, session count, client count, prefix).
 
     Returns:
         JSON string containing server status info.
@@ -20,6 +20,7 @@ async def tmux_server_info() -> str:
     running = True
     session_count = 0
     client_count = 0
+    prefix = "unknown"
 
     try:
         # Use display-message -p #{version} instead of -V so commands can be batched cleanly
@@ -28,6 +29,7 @@ async def tmux_server_info() -> str:
                 ["display-message", "-p", "#{version}"],
                 ["list-sessions", "-F", "#{session_id}"],
                 ["list-clients", "-F", "#{client_tty}"],
+                ["show-options", "-gv", "prefix"],
             ]
         )
 
@@ -40,6 +42,12 @@ async def tmux_server_info() -> str:
 
         cli_raw = batch_results[2]
         client_count = len([line for line in cli_raw.splitlines() if line.strip()])
+
+        prefix_raw = batch_results[3]
+        if prefix_raw:
+            prefix = prefix_raw.strip()
+            if not prefix or prefix == "none":
+                prefix = "unknown"
     except (TmuxNotRunningError, TmuxError) as e:
         logger.debug("Server not running or tmux command error: %s", e)
         running = False
@@ -56,6 +64,7 @@ async def tmux_server_info() -> str:
             "socket": socket_info,
             "session_count": session_count,
             "client_count": client_count,
+            "prefix": prefix,
         },
         indent=2,
     )

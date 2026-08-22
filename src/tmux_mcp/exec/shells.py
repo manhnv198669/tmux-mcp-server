@@ -11,11 +11,16 @@ def build_epilogue(
     channel: str,
     cmd_id: str,
     shell_type: str = "zsh",
+    remote: bool = False,
 ) -> str:
-    """Build a compound command string appending start/end markers, exit code capture, and wait-for signal."""
+    """Build a compound command string appending start/end markers, exit code capture, and wait-for signal.
+
+    When remote is True the tmux binary is referenced as plain "tmux": a locally
+    resolved path (shutil.which) does not exist on the remote host.
+    """
     sock_flags = get_socket_args()
     sock_str = " ".join(sock_flags)
-    tmux_bin = shutil.which("tmux") or "tmux"
+    tmux_bin = "tmux" if remote else (shutil.which("tmux") or "tmux")
     tmux_cmd = f"'{tmux_bin}' {sock_str}".strip()
 
     start_marker = f"__TMUX_MCP_START_{cmd_id}__"

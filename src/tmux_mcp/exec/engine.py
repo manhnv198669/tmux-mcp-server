@@ -9,7 +9,9 @@ import time
 import uuid
 
 from tmux_mcp.config import get_config
+from tmux_mcp.core import fsops
 from tmux_mcp.core.ansi import strip_ansi
+from tmux_mcp.core.context import current_host
 from tmux_mcp.core.errors import PaneBusyError, TmuxError, TmuxNotRunningError
 from tmux_mcp.core.formats import make_sentinel, parse_line, unescape_tmux_value
 from tmux_mcp.core.models import CommandRunModel
@@ -32,11 +34,16 @@ ALLOWED_SHELLS = {
 
 _SAFE_PATH_RE = re.compile(r"^[A-Za-z0-9/._-]+$")
 
+# Any command's boundary marker, not only the one being extracted.
+_MARKER_LINE_RE = re.compile(r"^__TMUX_MCP_(?:START|END)_[A-Za-z0-9_]+__$")
+
 MAX_OUTPUT_BYTES = 10 * 1024 * 1024  # 10MB cap
 MAX_OUTPUT_LINES = 100000  # Cap at 100,000 lines to support 50,000+ line benchmark tests
 
 
-def extract_clean_output(raw_text: str, cmd_id: str) -> tuple[str, bool]:
+def extract_clean_output(
+    raw_text: str, cmd_id: str, assume_partial: bool = False
+) -> tuple[str, bool]:
     """Extract clean command output between start and end markers.
 
     Returns:
@@ -44,11 +51,11 @@ def extract_clean_output(raw_text: str, cmd_id: str) -> tuple[str, bool]:
 
     3 Branches:
     1. Both start_marker and end_marker exist as exact lines:
-       Return lines between start_marker and end_marker.
+        Return lines between start_marker and end_marker.
     2. start_marker exists as exact line, but end_marker does NOT exist:
-       Return lines from start_marker to end of log (partial output while running/timed out).
+        Return lines from start_marker to end of log (partial output while running/timed out).
     3. start_marker does NOT exist:
-       Return empty string "" (command hasn't executed yet or prompt log).
+        Return empty string "" (command hasn't executed yet or prompt log).
     """
     clean_text = strip_ansi(raw_text)
     start_marker = f"__TMUX_MCP_START_{cmd_id}__"
@@ -66,17 +73,26 @@ def extract_clean_output(raw_text: str, cmd_id: str) -> tuple[str, bool]:
             break
 
     body_lines: list[str] = []
+    forced_truncated = False
     if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
         # Branch 1: Both markers present
         body_lines = lines[start_idx + 1 : end_idx]
     elif start_idx != -1 and end_idx == -1:
         # Branch 2: Start marker present, end marker missing (partial output)
         body_lines = lines[start_idx + 1 :]
+    elif assume_partial:
+        # Branch 4: the capture was read from its tail, so a missing start marker
+        # means the command's first lines fell outside the window rather than that
+        # it never ran. Returning "" here would read as "printed nothing", so hand
+        # back what survived -- minus any marker line, including one belonging to a
+        # neighbouring command -- and say plainly that it was cut.
+        body_lines = [line for line in lines if not _MARKER_LINE_RE.match(line.strip())]
+        forced_truncated = True
     else:
         # Branch 3: Start marker not reached yet
         return ("", False)
 
-    truncated = False
+    truncated = forced_truncated
     if len(body_lines) > MAX_OUTPUT_LINES:
         body_lines = body_lines[-MAX_OUTPUT_LINES:]
         truncated = True
@@ -166,18 +182,21 @@ async def run_command_engine(
 
     # 2. Setup command ID and temporary storage
     cmd_id = f"cmd_{uuid.uuid4().hex[:12]}"
-    tmp_dir = os.path.join(tempfile.gettempdir(), f"tmux-mcp-{cmd_id}")
+    cfg_tmp = get_config()
+    host = current_host()
+    base_dir = cfg_tmp.remote_tmp_dir if host else tempfile.gettempdir()
+    tmp_dir = os.path.join(base_dir, f"tmux-mcp-{cmd_id}")
 
     if not _SAFE_PATH_RE.match(tmp_dir):
         raise ValueError(f"Unsafe temporary directory path generated: {tmp_dir}")
 
-    os.makedirs(tmp_dir, exist_ok=True)
+    await fsops.make_dir(tmp_dir)
 
     cap_file = os.path.join(tmp_dir, "cap.log")
     rc_file = os.path.join(tmp_dir, "rc.txt")
     channel = f"tmux-mcp-wait-{cmd_id}"
 
-    open(cap_file, "a").close()
+    await fsops.touch(cap_file)
 
     # 3. Start capture stream via pipe-pane safely with shlex.quote (Blocker 3)
     safe_cap_file = shlex.quote(cap_file)
@@ -185,7 +204,14 @@ async def run_command_engine(
 
     # 4. Build command + epilogue with start/end markers
     cfg = get_config()
-    full_cmd = build_epilogue(command, rc_file, channel, cmd_id=cmd_id, shell_type=cfg.shell_type)
+    full_cmd = build_epilogue(
+        command,
+        rc_file,
+        channel,
+        cmd_id=cmd_id,
+        shell_type=cfg.shell_type,
+        remote=bool(current_host()),
+    )
 
     # 5. Create initial model and register
     model = CommandRunModel(
@@ -226,19 +252,19 @@ async def poll_or_wait_record(rec: CommandRecord, timeout: float = 30.0) -> Comm
     if rec.model.status in ("completed", "failed", "cancelled"):
         return rec.model
 
-    if os.path.exists(rec.rc_file) and os.path.getsize(rec.rc_file) > 0:
+    if await fsops.exists_nonempty(rec.rc_file):
         return await finalize_record(rec)
 
     if timeout <= 0:
-        return _update_running_record(rec)
+        return await _update_running_record(rec)
 
     try:
         await run_tmux(["wait-for", rec.channel], timeout=timeout)
         return await finalize_record(rec)
     except (TimeoutError, TmuxError):
-        if os.path.exists(rec.rc_file) and os.path.getsize(rec.rc_file) > 0:
+        if await fsops.exists_nonempty(rec.rc_file):
             return await finalize_record(rec)
-        return _update_running_record(rec)
+        return await _update_running_record(rec)
 
 
 async def finalize_record(rec: CommandRecord) -> CommandRunModel:
@@ -246,23 +272,23 @@ async def finalize_record(rec: CommandRecord) -> CommandRunModel:
     await stop_pipe_pane(rec.model.pane_id)
 
     exit_code = 0
-    if os.path.exists(rec.rc_file):
-        try:
-            with open(rec.rc_file) as f:
-                content = f.read().strip()
-                if content.lstrip("-").isdigit():
-                    exit_code = int(content)
-        except OSError as e:
-            logger.warning("Could not read exit code file %s: %s", rec.rc_file, e)
+    try:
+        content = (await fsops.read_text(rec.rc_file)).strip()
+        if content.lstrip("-").isdigit():
+            exit_code = int(content)
+    except OSError as e:
+        logger.warning("Could not read exit code file %s: %s", rec.rc_file, e)
 
     output_text = ""
     truncated = False
-    if os.path.exists(rec.cap_file):
-        try:
-            with open(rec.cap_file, errors="replace") as f:
-                output_text, truncated = extract_clean_output(f.read(), rec.model.command_id)
-        except OSError as e:
-            logger.warning("Could not read capture file %s: %s", rec.cap_file, e)
+    try:
+        raw_text = await fsops.read_text(rec.cap_file, max_bytes=MAX_OUTPUT_BYTES * 2)
+        assume_partial = len(raw_text) >= MAX_OUTPUT_BYTES * 2
+        output_text, truncated = extract_clean_output(
+            raw_text, rec.model.command_id, assume_partial=assume_partial
+        )
+    except OSError as e:
+        logger.warning("Could not read capture file %s: %s", rec.cap_file, e)
 
     rec.model.exit_code = exit_code
     rec.model.status = "completed" if exit_code == 0 else "failed"
@@ -275,16 +301,18 @@ async def finalize_record(rec: CommandRecord) -> CommandRunModel:
     return rec.model
 
 
-def _update_running_record(rec: CommandRecord) -> CommandRunModel:
+async def _update_running_record(rec: CommandRecord) -> CommandRunModel:
     """Update running record with current partial output."""
     output_text = ""
     truncated = False
-    if os.path.exists(rec.cap_file):
-        try:
-            with open(rec.cap_file, errors="replace") as f:
-                output_text, truncated = extract_clean_output(f.read(), rec.model.command_id)
-        except OSError as e:
-            logger.warning("Could not read capture file %s: %s", rec.cap_file, e)
+    try:
+        raw_text = await fsops.read_text(rec.cap_file, max_bytes=MAX_OUTPUT_BYTES * 2)
+        assume_partial = len(raw_text) >= MAX_OUTPUT_BYTES * 2
+        output_text, truncated = extract_clean_output(
+            raw_text, rec.model.command_id, assume_partial=assume_partial
+        )
+    except OSError as e:
+        logger.warning("Could not read capture file %s: %s", rec.cap_file, e)
 
     rec.model.output = output_text
     rec.model.truncated = truncated

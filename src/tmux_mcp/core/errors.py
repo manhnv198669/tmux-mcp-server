@@ -79,3 +79,25 @@ class CommandTimeoutError(Exception):
         self.command_id = command_id
         self.timeout = timeout
         super().__init__(f"Command '{command_id}' timed out after {timeout} seconds.")
+
+
+class RemoteConnectionError(Exception):
+    """Raised when ssh itself fails (exit 255), as opposed to tmux failing."""
+
+    def __init__(self, host: str, stderr: str):
+        self.host = host
+        self.stderr = stderr.strip()
+        super().__init__(f"ssh connection to '{host}' failed: {self.stderr}")
+
+
+class UnknownHostError(Exception):
+    """Raised when a host is not in the allowed list."""
+
+    def __init__(self, host: str, allowed_patterns: tuple[str, ...]):
+        self.host = host
+        self.allowed_patterns = allowed_patterns
+        super().__init__(
+            f"Host '{host}' is not in the allowed list: {', '.join(allowed_patterns)}. "
+            f"An agent holding an ssh agent key can otherwise reach every machine that key "
+            f"opens, and nothing in this server would have said no."
+        )

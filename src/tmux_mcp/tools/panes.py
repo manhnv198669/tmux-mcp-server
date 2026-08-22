@@ -2,49 +2,114 @@
 
 import json
 import re
-from typing import Literal
 
 from tmux_mcp.core.ansi import strip_ansi
 from tmux_mcp.core.errors import TmuxError, TmuxNotRunningError
 from tmux_mcp.core.formats import get_pane_format, make_sentinel, parse_line, unescape_tmux_value
 from tmux_mcp.core.guard import assert_pane_writable
 from tmux_mcp.core.models import PaneModel
+from tmux_mcp.core.prefix import resolve_prefix
 from tmux_mcp.core.runner import run_tmux
 
-SpecialKeyType = Literal[
-    "Up",
-    "Down",
-    "Left",
-    "Right",
-    "Enter",
-    "Escape",
-    "Tab",
-    "Space",
-    "BSpace",
-    "Delete",
-    "Home",
-    "End",
-    "PageUp",
-    "PageDown",
-    "F1",
-    "F2",
-    "F3",
-    "F4",
-    "F5",
-    "F6",
-    "F7",
-    "F8",
-    "F9",
-    "F10",
-    "F11",
-    "F12",
-    "C-c",
-    "C-d",
-    "C-z",
-    "C-l",
-    "C-a",
-    "C-e",
-]
+NAMED_KEYS = frozenset({
+    "up", "down", "left", "right", "enter", "escape", "tab", "space", "bspace", "btab",
+    "delete", "dc", "ic", "insert", "home", "end", "pageup", "pagedown", "npage", "ppage",
+    # tmux only knows F1..F12; an unknown name like "F13" is silently typed into the
+    # pane as literal text instead of being sent as a key, so it must not validate.
+    "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12",
+})
+
+
+def validate_key(key: str) -> str:
+    """Validate a key specification.
+
+    Accepts an optional chain of modifiers C-, M-, S- (case-insensitive, any order,
+    each at most once), followed by EITHER a single printable ASCII character OR
+    one of NAMED_KEYS (case-insensitive).
+
+    Returns the key unchanged when valid; raises ValueError with a clear message otherwise.
+    """
+    if not key or not key.strip():
+        raise ValueError("key cannot be empty or whitespace")
+
+    if len(key) > 32:
+        raise ValueError(f"key too long ({len(key)} chars), max 32")
+
+    key = key.strip()
+
+    if " " in key:
+        raise ValueError(f"key cannot contain spaces: '{key}'")
+
+    modifiers = {"c", "m", "s"}
+    seen_modifiers = set()
+    parts = key.split("-")
+    key_part = parts[-1].lower()
+
+    for part in parts[:-1]:
+        part_lower = part.lower()
+        if part_lower not in modifiers:
+            raise ValueError(f"invalid modifier '{part}'; must be C-, M-, or S-")
+        if part_lower in seen_modifiers:
+            raise ValueError(f"duplicate modifier '{part}'")
+        seen_modifiers.add(part_lower)
+
+    if len(key_part) == 1:
+        if ord(key_part) < 32 or ord(key_part) > 126:
+            raise ValueError(f"invalid printable character: '{key_part}'")
+    elif key_part not in NAMED_KEYS:
+        raise ValueError(f"unknown key name: '{key_part}' (must be a printable char or named key)")
+
+    return key
+
+
+async def tmux_send_special_key(
+    target: str = "",
+    key: str = "Enter",
+    repeat: int = 1,
+    exit_copy_mode: bool = False,
+    prefix_override: str = "",
+) -> str:
+    """Send a special keyboard shortcut or arrow key to a pane.
+
+    Refuses if the pane is in copy-mode, where navigation keys would scroll a human
+    viewer's screen instead of reaching the application.
+
+    Args:
+        target: Target pane ID (e.g. "%0").
+        key: Special key name (e.g. Up, Down, C-c, Enter, Escape, Tab, Prefix).
+             Use "Prefix" to send the tmux server's configured prefix key dynamically.
+        repeat: Number of times to repeat keypress (default 1).
+        exit_copy_mode: If True, cancel an active copy-mode before sending instead of
+            refusing.
+        prefix_override: When key is "Prefix", send this key instead of resolving the
+            local tmux server's prefix. Use this when the pane holds a NESTED or REMOTE
+            tmux (e.g. over ssh), where the prefix that matters belongs to that inner
+            server, which the local server cannot see. Keys sent with send-keys bypass
+            the local server's key table and are received by the tmux one level down
+            (nested/remote), so a single prefix is enough to reach it.
+
+    Returns:
+        JSON status message.
+    """
+    if key.lower() == "prefix":
+        if prefix_override:
+            key = validate_key(prefix_override)
+        else:
+            key = await resolve_prefix()
+    else:
+        validate_key(key)
+
+    await assert_pane_writable(target, exit_copy_mode=exit_copy_mode)
+
+    args = ["send-keys"]
+    if target:
+        args.extend(["-t", target])
+    if repeat > 1:
+        args.extend(["-N", str(repeat)])
+    args.append(key)
+
+    await run_tmux(args)
+    return json.dumps({"status": "sent_special", "target": target, "key": key, "repeat": repeat})
 
 
 def _parse_pane_model(fields: list[str]) -> PaneModel | None:
@@ -345,40 +410,6 @@ async def tmux_send_keys(
         await run_tmux(args_enter)
 
     return json.dumps({"status": "sent", "target": target, "keys": keys, "enter": enter})
-
-
-async def tmux_send_special_key(
-    target: str = "",
-    key: SpecialKeyType = "Enter",
-    repeat: int = 1,
-    exit_copy_mode: bool = False,
-) -> str:
-    """Send a special keyboard shortcut or arrow key to a pane.
-
-    Refuses if the pane is in copy-mode, where navigation keys would scroll a human
-    viewer's screen instead of reaching the application.
-
-    Args:
-        target: Target pane ID (e.g. "%0").
-        key: Special key name (e.g. Up, Down, C-c, Enter, Escape, Tab).
-        repeat: Number of times to repeat keypress (default 1).
-        exit_copy_mode: If True, cancel an active copy-mode before sending instead of
-            refusing.
-
-    Returns:
-        JSON status message.
-    """
-    await assert_pane_writable(target, exit_copy_mode=exit_copy_mode)
-
-    args = ["send-keys"]
-    if target:
-        args.extend(["-t", target])
-    if repeat > 1:
-        args.extend(["-N", str(repeat)])
-    args.append(key)
-
-    await run_tmux(args)
-    return json.dumps({"status": "sent_special", "target": target, "key": key, "repeat": repeat})
 
 
 async def tmux_clear_pane(

@@ -1,11 +1,10 @@
 """Command registry with TTL and LRU eviction for tracked executions."""
 
 import logging
-import os
-import shutil
 import time
 from dataclasses import dataclass
 
+from tmux_mcp.core import fsops
 from tmux_mcp.core.errors import TmuxError, TmuxNotRunningError
 from tmux_mcp.core.models import CommandRunModel
 from tmux_mcp.core.runner import run_tmux
@@ -107,9 +106,9 @@ class CommandRegistry:
                     rec.model.command_id,
                     e,
                 )
-            if rec.tmp_dir and os.path.exists(rec.tmp_dir):
+            if rec.tmp_dir:
                 try:
-                    shutil.rmtree(rec.tmp_dir, ignore_errors=True)
+                    await fsops.remove_tree(rec.tmp_dir)
                 except OSError as e:
                     logger.warning("Could not remove temp dir %s: %s", rec.tmp_dir, e)
 

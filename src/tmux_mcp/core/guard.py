@@ -13,11 +13,13 @@ import fnmatch
 import logging
 
 from tmux_mcp.config import get_config
+from tmux_mcp.core.context import current_host
 from tmux_mcp.core.errors import (
     PaneInModeError,
     ProtectedTargetError,
     TmuxError,
     TmuxNotRunningError,
+    UnknownHostError,
 )
 from tmux_mcp.core.formats import make_sentinel, parse_line
 from tmux_mcp.core.runner import run_tmux
@@ -87,22 +89,43 @@ async def resolve_identities(target: str) -> list[str]:
         args.extend(["-t", target])
     args.append(fmt)
 
-    raw = await run_tmux(args)
-    fields = parse_line(raw.strip(), sep, expected_fields=7)
-    if len(fields) < 7:
-        return []
+    identities: list[str] = []
+    try:
+        raw = await run_tmux(args)
+        fields = parse_line(raw.strip(), sep, expected_fields=7)
+        if len(fields) >= 7:
+            sess, widx, wname, pidx, pane_id, window_id, session_id = fields[:7]
+            identities = [
+                sess,
+                f"{sess}:{widx}",
+                f"{sess}:{wname}",
+                f"{sess}:{widx}.{pidx}",
+                f"{sess}:{wname}.{pidx}",
+                pane_id,
+                window_id,
+                session_id,
+            ]
+    except (TmuxError, TmuxNotRunningError):
+        pass
 
-    sess, widx, wname, pidx, pane_id, window_id, session_id = fields[:7]
-    return [
-        sess,
-        f"{sess}:{widx}",
-        f"{sess}:{wname}",
-        f"{sess}:{widx}.{pidx}",
-        f"{sess}:{wname}.{pidx}",
-        pane_id,
-        window_id,
-        session_id,
-    ]
+    host = current_host()
+    if host:
+        identities.insert(0, f"host:{host}")
+
+    return identities
+
+
+def _refuse_if_matched(identity: str, patterns: tuple[str, ...], target: str) -> None:
+    """Raise if one identity of the target matches any protection pattern."""
+    for pattern in patterns:
+        if fnmatch.fnmatch(identity, pattern):
+            logger.warning(
+                "protection: refused write to %r (identity %r matches %r)",
+                target or "<current pane>",
+                identity,
+                pattern,
+            )
+            raise ProtectedTargetError(target, identity, pattern)
 
 
 async def assert_target_allowed(target: str) -> None:
@@ -110,6 +133,14 @@ async def assert_target_allowed(target: str) -> None:
     patterns = get_config().protected_targets
     if not patterns:
         return
+
+    # The host is tested before anything is resolved, because naming a session or a
+    # pane means reaching the machine first. A protected host that is unreachable
+    # would otherwise resolve to no identities at all and be waved through, which is
+    # exactly backwards: a host you cannot see is not a host you should be writing to.
+    host = current_host()
+    if host:
+        _refuse_if_matched(f"host:{host}", patterns, target)
 
     try:
         identities = await resolve_identities(target)
@@ -120,17 +151,32 @@ async def assert_target_allowed(target: str) -> None:
         return
 
     for identity in identities:
-        if not identity:
-            continue
-        for pattern in patterns:
-            if fnmatch.fnmatch(identity, pattern):
-                logger.warning(
-                    "protection: refused write to %r (identity %r matches %r)",
-                    target or "<current pane>",
-                    identity,
-                    pattern,
-                )
-                raise ProtectedTargetError(target, identity, pattern)
+        if identity:
+            _refuse_if_matched(identity, patterns, target)
+
+
+def assert_host_allowed(host: str) -> None:
+    """Raise UnknownHostError if `host` is not in the allowed list.
+
+    An empty host is always fine (it means "the server's default"). When
+    `allowed_hosts` is empty, any host is allowed. Otherwise the host must match
+    one of the patterns with fnmatch.
+
+    An agent holding an ssh agent key can otherwise reach every machine that key
+    opens, and nothing in this server would have said no.
+    """
+    if not host:
+        return
+
+    allowed = get_config().allowed_hosts
+    if not allowed:
+        return
+
+    for pattern in allowed:
+        if fnmatch.fnmatch(host, pattern):
+            return
+
+    raise UnknownHostError(host, allowed)
 
 
 def parse_patterns(raw_values: list[str] | None) -> tuple[str, ...]:

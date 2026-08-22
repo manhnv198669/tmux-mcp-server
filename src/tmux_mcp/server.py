@@ -10,7 +10,8 @@ from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
 from tmux_mcp.config import Config, get_config, set_config
-from tmux_mcp.core.guard import assert_target_allowed
+from tmux_mcp.core.context import use_host
+from tmux_mcp.core.guard import assert_host_allowed, assert_target_allowed
 from tmux_mcp.tools.execution import (
     tmux_cancel_command,
     tmux_get_command_result,
@@ -92,6 +93,12 @@ STANDARD_PROFILE_TOOLS = {
 GUARDED_PARAMS = ("target", "to_pane")
 
 
+HOST_DESC = (
+    " Pass host to run this against the tmux server on another machine over ssh "
+    "(e.g. host='prod-01'); omit it for the local tmux."
+)
+
+
 def _protect(func: Callable[..., Any]) -> Callable[..., Any]:
     """Wrap a mutating tool so protected targets are refused before tmux is touched.
 
@@ -111,6 +118,26 @@ def _protect(func: Callable[..., Any]) -> Callable[..., Any]:
                 await assert_target_allowed(bound.arguments.get(param) or "")
         return await func(*args, **kwargs)
 
+    return wrapper
+
+
+def _with_host(func):
+    """Give a tool an optional `host` argument that aims it at a remote tmux."""
+    sig = inspect.signature(func)
+    params = [*sig.parameters.values(),
+              inspect.Parameter("host", inspect.Parameter.KEYWORD_ONLY, default="", annotation=str)]
+
+    @functools.wraps(func)
+    async def wrapper(*args, host: str = "", **kwargs):
+        assert_host_allowed(host)
+        with use_host(host):
+            return await func(*args, **kwargs)
+
+    wrapper.__signature__ = sig.replace(parameters=params)
+    wrapper.__annotations__ = {**getattr(func, "__annotations__", {}), "host": str}
+    del wrapper.__wrapped__
+    # functools.wraps sets __wrapped__, which would make inspect.signature unwrap
+    # straight back to the undecorated function and drop `host` from the schema again.
     return wrapper
 
 
@@ -206,11 +233,11 @@ def create_server(config: Config | None = None) -> MCPServer:
             if name not in allowed_names:
                 continue
 
-        registered = _protect(func) if (is_mutating and cfg.protected_targets) else func
+        registered = _with_host(_protect(func) if (is_mutating and cfg.protected_targets) else func)
 
         app.tool(
             name=name,
-            description=desc,
+            description=desc + HOST_DESC,
             annotations=annot,
         )(registered)
 
