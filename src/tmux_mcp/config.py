@@ -18,6 +18,12 @@ class Config:
     # fnmatch patterns; any target resolving to a match rejects every mutating tool.
     protected_targets: tuple[str, ...] = ()
     default_capture_lines: int = 200
+    # Payloads longer than this go through a tmux paste buffer instead of
+    # `send-keys -l`. See core/keys.py for why both limits exist.
+    paste_threshold: int = 200
+    # A TUI that handles bracketed paste needs a moment to absorb the paste before
+    # it will read an Enter as "submit" rather than as part of the burst.
+    paste_enter_delay: float = 0.3
     log_level: str = "INFO"
     # Commands run through run_command are recorded here rather than in the user's
     # shell history, which is theirs to navigate.

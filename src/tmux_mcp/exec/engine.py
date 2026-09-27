@@ -14,6 +14,7 @@ from tmux_mcp.core.ansi import strip_ansi
 from tmux_mcp.core.context import current_host
 from tmux_mcp.core.errors import PaneBusyError, TmuxError, TmuxNotRunningError
 from tmux_mcp.core.formats import make_sentinel, parse_line, unescape_tmux_value
+from tmux_mcp.core.keys import send_literal_text
 from tmux_mcp.core.models import CommandRunModel
 from tmux_mcp.core.runner import run_tmux
 from tmux_mcp.exec.history import record_finished, record_started
@@ -229,7 +230,9 @@ async def run_command_engine(
     registry.register(model, tmp_dir, channel, cap_file, rc_file, cwd=cwd, pane=resolved_pane)
 
     # 6. Send command to pane
-    await run_tmux(["send-keys", "-t", target_pane, "-l", "--", full_cmd])
+    # The epilogue wraps the user's command in markers and can outgrow tmux's 16KB
+    # command-line limit on its own, so it goes through the same size-aware path.
+    await send_literal_text(target_pane, full_cmd)
     await run_tmux(["send-keys", "-t", target_pane, "Enter"])
 
     # Logged at dispatch rather than at completion, so `tail -f` on the history file

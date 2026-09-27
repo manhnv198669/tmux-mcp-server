@@ -39,7 +39,7 @@ class FakeProc:
         self._stderr = stderr
         self.pid = 4242
 
-    async def communicate(self):
+    async def communicate(self, input_data=None):
         return (b"", self._stderr)
 
     def kill(self):

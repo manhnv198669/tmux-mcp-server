@@ -1,12 +1,15 @@
 """Tmux pane management tools (read and interact)."""
 
+import asyncio
 import json
 import re
 
+from tmux_mcp.config import get_config
 from tmux_mcp.core.ansi import strip_ansi
 from tmux_mcp.core.errors import TmuxError, TmuxNotRunningError
 from tmux_mcp.core.formats import get_pane_format, make_sentinel, parse_line, unescape_tmux_value
 from tmux_mcp.core.guard import assert_pane_writable
+from tmux_mcp.core.keys import send_literal_text
 from tmux_mcp.core.models import PaneModel
 from tmux_mcp.core.prefix import resolve_prefix
 from tmux_mcp.core.runner import run_tmux
@@ -371,10 +374,15 @@ async def tmux_send_keys(
     keys: str = "",
     enter: bool = False,
     exit_copy_mode: bool = False,
+    paste: bool = False,
 ) -> str:
     """Send literal string text to a target pane.
 
-    Uses send-keys -l -- to safely send literal text without interpreting key names.
+    Short text goes through `send-keys -l --`, which sends it literally without
+    interpreting key names. Anything larger is delivered as a tmux paste buffer
+    instead: `send-keys` carries the payload on the command line, which tmux caps
+    at 16KB ("command too long"), and a full-screen application can drop part of a
+    long keystroke burst well before that. See core/keys.py.
 
     Refuses if the pane is in copy-mode: tmux would feed the keys to the mode's key
     table, execute a truncated fragment of them in the shell, and silently drop the
@@ -386,30 +394,44 @@ async def tmux_send_keys(
         enter: If True, sends Enter key after text payload (default False).
         exit_copy_mode: If True, cancel an active copy-mode before typing instead of
             refusing. This yanks a human viewer's screen back to the live output.
+        paste: Force paste-buffer delivery even for short text, so an application
+            that supports bracketed paste sees one paste event rather than typing.
 
     Returns:
-        JSON status message.
+        JSON status message, including the delivery method actually used.
     """
     if not keys and not enter:
         return json.dumps({"status": "no_op"})
 
     await assert_pane_writable(target, exit_copy_mode=exit_copy_mode)
 
+    method = "keys"
     if keys:
-        args = ["send-keys"]
-        if target:
-            args.extend(["-t", target])
-        args.extend(["-l", "--", keys])
-        await run_tmux(args)
+        method = await send_literal_text(target, keys, force_paste=paste)
 
     if enter:
+        if method != "keys":
+            # A pasting application batches the burst and reads it after a short
+            # idle gap; an Enter that lands inside that gap is absorbed into the
+            # paste instead of submitting it.
+            await asyncio.sleep(max(get_config().paste_enter_delay, 0.0))
         args_enter = ["send-keys"]
         if target:
             args_enter.extend(["-t", target])
         args_enter.append("Enter")
         await run_tmux(args_enter)
 
-    return json.dumps({"status": "sent", "target": target, "keys": keys, "enter": enter})
+    return json.dumps(
+        {
+            "status": "sent",
+            "target": target,
+            "keys": keys,
+            "enter": enter,
+            "method": method,
+            "bytes": len(keys.encode()),
+        }
+    )
+
 
 
 async def tmux_clear_pane(

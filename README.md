@@ -373,6 +373,25 @@ tmux pipe-pane -t <agent-pane> -o 'cat >> /tmp/agent.log'
 less +F /tmp/agent.log   # your own pane, your own scrollback
 ```
 
+**Large payloads.** `send-keys -l` carries the whole text as one argv element, and tmux
+caps a client→server command message at 16KB: past roughly 16,300 bytes tmux answers
+`command too long` and nothing is typed at all. Below that ceiling a full-screen
+application can still lose part of a long burst, because the bytes reach it as thousands
+of individual keypresses and a TUI that re-renders between reads processes only some of
+them — the classic symptom is a prompt whose head is missing and whose tail arrived.
+
+`send_keys` therefore switches to a tmux paste buffer above 200 bytes: `load-buffer -`
+takes the payload on stdin (no command-line limit at all) and `paste-buffer -p` wraps it
+in bracketed-paste markers when the application asked for them, so the app sees one paste
+event. The JSON reply reports which path ran as `method`: `keys`, `paste` or `chunked`
+(the fallback for a tmux without `load-buffer -`). Pass `paste=true` to force the paste
+path for short text. A 100KB payload arrives byte-identical; `Enter` is sent after a short
+settle delay so a pasting TUI submits it rather than absorbing it into the burst.
+
+One limit this cannot lift: a pane whose foreground process reads the tty in *canonical*
+mode (`cat`, `read`, a password prompt) is capped by the line discipline at `MAX_CANON`
+(1024 bytes) per line, and the kernel discards the rest however the bytes were delivered.
+
 ### Panes — Layout & Sizing (9)
 - `split_pane`
 - `select_pane`

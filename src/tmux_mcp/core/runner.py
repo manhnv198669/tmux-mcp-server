@@ -9,7 +9,7 @@ import fnmatch
 import logging
 import shlex
 import uuid
-from asyncio.subprocess import PIPE
+from asyncio.subprocess import DEVNULL, PIPE
 
 from tmux_mcp.config import get_config
 from tmux_mcp.core.context import current_host
@@ -67,8 +67,15 @@ async def run_tmux(
     timeout: float = 10.0,
     override_socket_name: str = "",
     override_socket_path: str = "",
+    input_data: bytes | None = None,
 ) -> str:
     """Execute a single tmux command via argv list (never shell=True).
+
+    Args:
+        input_data: Bytes written to the command's stdin, for the tmux commands
+            that read a payload from a stream (`load-buffer -`) instead of from
+            argv. Passing it here keeps large payloads out of the command line,
+            which tmux caps at 16KB.
 
     Raises:
         TmuxError: If tmux returns non-zero status.
@@ -88,6 +95,7 @@ async def run_tmux(
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
+            stdin=PIPE if input_data is not None else DEVNULL,
             stdout=PIPE,
             stderr=PIPE,
         )
@@ -98,7 +106,7 @@ async def run_tmux(
 
     try:
         out_bytes, err_bytes = await asyncio.wait_for(
-            proc.communicate(), timeout=effective_timeout
+            proc.communicate(input_data), timeout=effective_timeout
         )
     except TimeoutError:
         try:
