@@ -9,6 +9,7 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
+from tmux_mcp import __version__
 from tmux_mcp.config import Config, get_config, set_config
 from tmux_mcp.core.context import use_host
 from tmux_mcp.core.guard import assert_host_allowed, assert_target_allowed
@@ -151,7 +152,7 @@ def create_server(config: Config | None = None) -> MCPServer:
         name="tmux-mcp",
         title="tmux MCP Server",
         description="MCP server exposing tmux command-line operations cleanly and securely.",
-        version="0.1.0",
+        version=__version__,
     )
 
     read_only_annot = ToolAnnotations(readOnlyHint=True, idempotentHint=True)

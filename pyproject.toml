@@ -3,7 +3,7 @@
 # Publishing under it is impossible and `uvx tmux-mcp` would fetch that other
 # package instead of this one.
 name = "tmux-mcp-server"
-version = "1.0.0"
+version = "1.1.0"
 description = "Model Context Protocol (MCP) server for tmux written in Python"
 readme = "README.md"
 requires-python = ">=3.11"
